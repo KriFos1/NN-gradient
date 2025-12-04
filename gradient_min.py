@@ -64,6 +64,26 @@ nn_input_dict = {'input_shape': (3,128), # These are fixed
     }
 NN_sim = EMProxy(**nn_input_dict)
 
+# read trajectory of well to ensure that the grid is aligned
+T=np.loadtxt('data/Benchmark-3/ascii/trajectory.DAT',comments='%')
+TVD =T[:,1]
+
+# The grid does not have any depth. The well position is controlled by the one-hot vector, and the assumption that each grid cell is 0.5 m (1.64042 ft) thick.
+# Given the well trajectory, the grid cell size, and the initial value of the one-hot vector. We can update the one-hot vector to match the well position at each measurement point.
+# One strict assumption is that tvd[-1] - tvd[0] < 128 * 1.64042 ft
+# Assert thision
+Dh = 1.64042 #ft. (0.5 m)
+assert TVD[-1] - TVD[0] < 128 * Dh, "The well trajectory exceeds the grid depth range."
+
+
+# Cell-center values
+grid_size = 128
+# Initial position in one-hot vector
+well_start_index = 25  # starting at cell 25
+
+# Cell center positions: TVD[0] is at center of cell 25
+# Cell indices go from 0 to 127, with cell well_start_index at TVD[0]
+cell_center_tvd = TVD[0] + (np.arange(grid_size) - well_start_index) * Dh
 
 NN_data_names = [
         'real(xx)', 'img(xx)',
@@ -111,7 +131,7 @@ def simulate_and_grad(param, data_real, Cd):
     resistivity = np.zeros((3, grid_size))
     resistivity[0,:] = param
     resistivity[1,:] = param
-    resistivity[2,64] = 1  # well position
+    resistivity[2,well_pos_index] = 1  # well position
     resistivity_tensor = torch.tensor(resistivity, dtype=torch.float32)
 
     nn_pred_tensor = NN_sim.image_to_log(resistivity_tensor)
@@ -188,10 +208,88 @@ Cm = np.cov(sample_cov,ddof=1)
 
 mean_res, cov_res = lognormal_from_log_gaussian(np.ones(grid_size)*log_rh_mean, Cm)
 
-def process_ensemble_member(ens_idx, el, assim_index):
+def generate_conditioned_ensemble(posterior_log_rh, Cm, ne, seed=42):
+    """
+    Generate new ensemble conditioned on posterior using Sequential Gaussian Simulation (Kriging-based).
+    
+    This uses kriging to condition unconditional realizations on the posterior ensemble statistics,
+    preserving spatial correlation while introducing stochasticity for the next assimilation step.
+    
+    Parameters:
+    -----------
+    posterior_log_rh : (grid_size, ne) array
+        Log-resistivity ensemble from previous assimilation step
+    Cm : (grid_size, grid_size) array
+        Prior covariance matrix
+    ne : int
+        Number of ensemble members
+    seed : int
+        Random seed for reproducibility
+    
+    Returns:
+    --------
+    new_log_rh : (grid_size, ne) array
+        New conditioned ensemble in log-space
+    """
+    grid_size = posterior_log_rh.shape[0]
+    
+    # Compute posterior statistics
+    posterior_mean = posterior_log_rh.mean(axis=1)
+    
+    # Generate unconditional realizations from prior
+    new_log_rh = np.zeros((grid_size, ne))
+    rng = np.random.default_rng(seed)
+    
+    # Cholesky decomposition of prior covariance for unconditional simulation
+    try:
+        L = np.linalg.cholesky(Cm + 1e-8 * np.eye(grid_size))
+    except np.linalg.LinAlgError:
+        # Fallback to eigenvalue decomposition
+        eigvals, eigvecs = np.linalg.eigh(Cm)
+        eigvals = np.maximum(eigvals, 1e-8)
+        L = eigvecs @ np.diag(np.sqrt(eigvals))
+    
+    # Generate unconditional realizations
+    for i in range(ne):
+        z = rng.standard_normal(grid_size)
+        new_log_rh[:, i] = L @ z
+    
+    # Kriging: condition unconditional realizations on posterior mean
+    # Using simple kriging: x_conditioned = x_uncond + C_cross @ C_data^-1 @ (data - mean)
+    
+    # For computational efficiency, use subset of grid points as conditioning data
+    # Sample every n-th point or use reduced set
+    conditioning_stride = max(1, grid_size // 64)  # Use ~64 conditioning points
+    conditioning_indices = np.arange(0, grid_size, conditioning_stride)
+    n_cond = len(conditioning_indices)
+    
+    # Extract covariance blocks
+    C_data = Cm[np.ix_(conditioning_indices, conditioning_indices)]  # Cov between conditioning points
+    C_cross = Cm[:, conditioning_indices]  # Cross-covariance
+    
+    # Kriging weights: K = C_cross @ C_data^-1
+    try:
+        K = C_cross @ np.linalg.inv(C_data + 1e-6 * np.eye(n_cond))
+    except np.linalg.LinAlgError:
+        # Use pseudo-inverse if singular
+        K = C_cross @ np.linalg.pinv(C_data + 1e-6 * np.eye(n_cond))
+    
+    # Condition each realization
+    for i in range(ne):
+        # Kriging update: add correction based on difference at conditioning points
+        uncond_at_cond = new_log_rh[conditioning_indices, i]
+        target_at_cond = posterior_mean[conditioning_indices]
+        residual = target_at_cond - uncond_at_cond
+        
+        # Apply kriging correction
+        new_log_rh[:, i] = new_log_rh[:, i] + K @ residual
+    
+    return new_log_rh
+
+def process_ensemble_member(ens_idx, el, assim_index, current_log_rh_ensemble):
     """Process a single ensemble member optimization"""
-    # Use ensemble-specific resistivity
-    resistivity = np.exp(pr['rh'][:, ens_idx])
+    # Use ensemble-specific resistivity from current ensemble
+    resistivity = np.exp(current_log_rh_ensemble[:, ens_idx])
     
     # Extract the el-th row of Cd and concatenate variance values
     # Each element in Cd is ['ABS', [...]], we want only the [...] part
@@ -209,9 +307,9 @@ def process_ensemble_member(ens_idx, el, assim_index):
                    method='trust-constr',
                    jac=True,
                    bounds=Bounds(lb=0.5, ub=np.inf),
-                   options={'verbose': 0,
+                   options={'verbose': 2,
                             'maxiter': 100,
-                            'initial_tr_radius': 1.0,  # Larger initial trust region
+                            'initial_tr_radius': 50.0,  # Larger initial trust region
                             'gtol': 1e-1,
                             'xtol': 1e-1
                             })
@@ -235,18 +333,26 @@ resistivity_mean = np.exp(pr['rh']).mean(axis=1)
 plt.figure(); plt.imshow(resistivity_mean.reshape(grid_size,1), aspect='auto')
 plt.colorbar(); plt.title('Initial ensemble mean - rh'); plt.savefig(f'rh_initial_mean_{data_type}.png'); plt.close()
 
+# Initialize with prior ensemble in log-space
+current_log_rh_ensemble = pr['rh'].copy()
+
 #for el,assim_index in enumerate(tot_assim_index[:15]):
-for el, assim_index in enumerate([tot_assim_index[0]]):
+for el, assim_index in enumerate(tot_assim_index):  # Process multiple assimilation steps
+    # well position index is the closest cell to the current tvd
+    well_pos_index = np.argmin(np.abs(cell_center_tvd - TVD[el]))
+
     print(f"\nProcessing assimilation step {el} with {ne} ensemble members in parallel...")
     
     # Parallel execution over ensemble members
     n_jobs = min(ne, os.cpu_count())  # Use available CPU cores
-    # for ens_idx in range(ne):
-    #     results = process_ensemble_member(ens_idx, el, assim_index)
     results = Parallel(n_jobs=n_jobs, verbose=10)(
-        delayed(process_ensemble_member)(ens_idx, el, assim_index) 
+        delayed(process_ensemble_member)(ens_idx, el, assim_index, current_log_rh_ensemble) 
         for ens_idx in range(ne)
     )
+    # results = list(map(
+    #     lambda ens_idx: process_ensemble_member(ens_idx, el, assim_index, current_log_rh_ensemble),
+    #     range(ne)
+    # ))
     
     # Process results
     posterior_ensemble = np.zeros((grid_size, ne))
@@ -254,6 +360,9 @@ for el, assim_index in enumerate([tot_assim_index[0]]):
         posterior_ensemble[:, ens_idx] = posterior
         if not success:
             print(f"Warning: Optimization failed for ensemble member {ens_idx}")
+    
+    # Convert posterior to log-space for next iteration
+    posterior_log_ensemble = np.log(posterior_ensemble)
     
     # Plot ensemble mean of posterior
     plt.figure(); plt.imshow(posterior_ensemble.mean(axis=1).reshape(grid_size,1), aspect='auto')
@@ -264,3 +373,20 @@ for el, assim_index in enumerate([tot_assim_index[0]]):
     plt.figure(); plt.imshow(posterior_ensemble.std(axis=1).reshape(grid_size,1), aspect='auto')
     plt.colorbar(); plt.title(f'Posterior ensemble std assim {el} - rh')
     plt.savefig(f'rh_assim{el}_ensemble_std_{data_type}.png'); plt.close()
+
+    # save posterior ensemble to file
+    np.savez_compressed(f'rh_assim{el}_posterior_ensemble_{data_type}.npz', posterior_ensemble=posterior_ensemble)
+    
+    # Condition the ensemble for next assimilation step
+    # This maintains spatial correlation while adding stochasticity
+    if el < len(tot_assim_index) - 1:  # Don't generate for last step
+        print(f"Generating conditioned ensemble for next assimilation step...")
+        current_log_rh_ensemble = generate_conditioned_ensemble(
+            posterior_log_ensemble, Cm, ne, seed=100 + el
+        )
+        
+        # Plot conditioned ensemble mean to verify
+        conditioned_mean = np.exp(current_log_rh_ensemble).mean(axis=1)
+        plt.figure(); plt.imshow(conditioned_mean.reshape(grid_size,1), aspect='auto')
+        plt.colorbar(); plt.title(f'Conditioned ensemble mean for assim {el+1} - rh')
+        plt.savefig(f'rh_conditioned_{el+1}_ensemble_mean_{data_type}.png'); plt.close()
