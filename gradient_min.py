@@ -195,7 +195,7 @@ grid_size = 128
 Dh = 1.64042 #ft. (0.5 m)
 log_rh_mean = 0.0
 log_rh_std = 0.25
-ne = 200
+ne = 2
 pr = {
     'rh': (np.ones(grid_size)*log_rh_mean).reshape(-1, 1)+ fast_gaussian(np.array([1,grid_size]),
                                                                             np.array([log_rh_std]),
@@ -293,9 +293,9 @@ def process_ensemble_member(ens_idx, el, assim_index, current_log_rh_ensemble):
     
     # Extract the el-th row of Cd and concatenate variance values
     # Each element in Cd is ['ABS', [...]], we want only the [...] part
-    Cd_row = Cd.iloc[assim_index]
+    Cd_row = Cd.iloc[el]
     Cd_vec = np.concatenate([np.array(cell[1])[[val[1] for val in mapping.values()]] for cell in Cd_row])
-    data_vec = np.concatenate([data.iloc[assim_index][dat][[val[1] for val in mapping.values()]] for dat in data_keys])
+    data_vec = np.concatenate([data.iloc[el][dat][[val[1] for val in mapping.values()]] for dat in data_keys])
 
     # Use ensemble-specific random seed for reproducibility
     rng = np.random.default_rng(seed=10 + ens_idx)
@@ -337,22 +337,23 @@ plt.colorbar(); plt.title('Initial ensemble mean - rh'); plt.savefig(f'rh_initia
 current_log_rh_ensemble = pr['rh'].copy()
 
 #for el,assim_index in enumerate(tot_assim_index[:15]):
-for el, assim_index in enumerate(tot_assim_index[::10]):  # Process multiple assimilation steps
+for el in range(0, len(tot_assim_index), 10):  # Process every 10th step: 0, 10, 20, ...
+    assim_index = tot_assim_index[el]
     # well position index is the closest cell to the current tvd
     well_pos_index = np.argmin(np.abs(cell_center_tvd - TVD[el]))
 
     print(f"\nProcessing assimilation step {el} with {ne} ensemble members in parallel...")
     
     # Parallel execution over ensemble members
-    n_jobs = min(100, ne, os.cpu_count())  # Use available CPU cores
-    results = Parallel(n_jobs=n_jobs, verbose=10)(
-        delayed(process_ensemble_member)(ens_idx, el, assim_index, current_log_rh_ensemble) 
-        for ens_idx in range(ne)
-    )
-    # results = list(map(
-    #     lambda ens_idx: process_ensemble_member(ens_idx, el, assim_index, current_log_rh_ensemble),
-    #     range(ne)
-    # ))
+    # n_jobs = min(100, ne, os.cpu_count())  # Use available CPU cores
+    # results = Parallel(n_jobs=n_jobs, verbose=10)(
+    #     delayed(process_ensemble_member)(ens_idx, el, assim_index, current_log_rh_ensemble) 
+    #     for ens_idx in range(ne)
+    # )
+    results = list(map(
+        lambda ens_idx: process_ensemble_member(ens_idx, el, assim_index, current_log_rh_ensemble),
+        range(ne)
+    ))
     
     # Process results
     posterior_ensemble = np.zeros((grid_size, ne))
