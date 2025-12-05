@@ -6,7 +6,7 @@ import pandas as pd
 data_index = [('6kHz','83ft'),('12kHz','83ft'),('24kHz','83ft'),('24kHz','43ft'),('48kHz','43ft'),('96kHz','43ft')]
 datatyp = 'Bfield'
 
-path_to_benchmark = '../inversion/data/Benchmark-3/'
+path_to_benchmark = 'data/Benchmark-3/'
 
 T=np.loadtxt(f'{path_to_benchmark}ascii/trajectory.DAT',comments='%')
 tvd =T[:,1]

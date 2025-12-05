@@ -293,9 +293,9 @@ def process_ensemble_member(ens_idx, el, assim_index, current_log_rh_ensemble):
     
     # Extract the el-th row of Cd and concatenate variance values
     # Each element in Cd is ['ABS', [...]], we want only the [...] part
-    Cd_row = Cd.iloc[el]
+    Cd_row = Cd.iloc[assim_index]
     Cd_vec = np.concatenate([np.array(cell[1])[[val[1] for val in mapping.values()]] for cell in Cd_row])
-    data_vec = np.concatenate([data.iloc[el][dat][[val[1] for val in mapping.values()]] for dat in data_keys])
+    data_vec = np.concatenate([data.iloc[assim_index][dat][[val[1] for val in mapping.values()]] for dat in data_keys])
 
     # Use ensemble-specific random seed for reproducibility
     rng = np.random.default_rng(seed=10 + ens_idx)
@@ -307,7 +307,7 @@ def process_ensemble_member(ens_idx, el, assim_index, current_log_rh_ensemble):
                    method='trust-constr',
                    jac=True,
                    bounds=Bounds(lb=0.5, ub=np.inf),
-                   options={'verbose': 2,
+                   options={'verbose': 0,
                             'maxiter': 100,
                             'initial_tr_radius': 50.0,  # Larger initial trust region
                             'gtol': 1e-1,
@@ -337,14 +337,14 @@ plt.colorbar(); plt.title('Initial ensemble mean - rh'); plt.savefig(f'rh_initia
 current_log_rh_ensemble = pr['rh'].copy()
 
 #for el,assim_index in enumerate(tot_assim_index[:15]):
-for el, assim_index in enumerate(tot_assim_index):  # Process multiple assimilation steps
+for el, assim_index in enumerate(tot_assim_index[::10]):  # Process multiple assimilation steps
     # well position index is the closest cell to the current tvd
     well_pos_index = np.argmin(np.abs(cell_center_tvd - TVD[el]))
 
     print(f"\nProcessing assimilation step {el} with {ne} ensemble members in parallel...")
     
     # Parallel execution over ensemble members
-    n_jobs = min(ne, os.cpu_count())  # Use available CPU cores
+    n_jobs = min(100, ne, os.cpu_count())  # Use available CPU cores
     results = Parallel(n_jobs=n_jobs, verbose=10)(
         delayed(process_ensemble_member)(ens_idx, el, assim_index, current_log_rh_ensemble) 
         for ens_idx in range(ne)
@@ -380,13 +380,16 @@ for el, assim_index in enumerate(tot_assim_index):  # Process multiple assimilat
     # Condition the ensemble for next assimilation step
     # This maintains spatial correlation while adding stochasticity
     if el < len(tot_assim_index) - 1:  # Don't generate for last step
-        print(f"Generating conditioned ensemble for next assimilation step...")
-        current_log_rh_ensemble = generate_conditioned_ensemble(
-            posterior_log_ensemble, Cm, ne, seed=100 + el
-        )
+ #       print(f"Generating conditioned ensemble for next assimilation step...")
+        current_log_rh_ensemble = (np.ones(grid_size)*log_rh_mean).reshape(-1, 1)+ fast_gaussian(np.array([1,grid_size]),
+                                                                            np.array([log_rh_std]),
+                    np.array([1, int(np.ceil(v_corr / Dh))]),num_samples=ne)
+ #generate_conditioned_ensemble(
+  #          posterior_log_ensemble, Cm, ne, seed=100 + el
+  #      )
         
         # Plot conditioned ensemble mean to verify
-        conditioned_mean = np.exp(current_log_rh_ensemble).mean(axis=1)
-        plt.figure(); plt.imshow(conditioned_mean.reshape(grid_size,1), aspect='auto')
-        plt.colorbar(); plt.title(f'Conditioned ensemble mean for assim {el+1} - rh')
-        plt.savefig(f'rh_conditioned_{el+1}_ensemble_mean_{data_type}.png'); plt.close()
+#        conditioned_mean = np.exp(current_log_rh_ensemble).mean(axis=1)
+#        plt.figure(); plt.imshow(conditioned_mean.reshape(grid_size,1), aspect='auto')
+#        plt.colorbar(); plt.title(f'Conditioned ensemble mean for assim {el+1} - rh')
+#        plt.savefig(f'rh_conditioned_{el+1}_ensemble_mean_{data_type}.png'); plt.close()
