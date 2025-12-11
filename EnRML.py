@@ -1,5 +1,6 @@
 import torch
 from NeuralSim.image_to_log import EMProxy
+from udar_proxi.utils import convert_bfield_to_udar
 
 import os
 # fix the seed for reproducability
@@ -16,7 +17,7 @@ from pipt.update_schemes.update_methods_ns.approx_update import approx_update # 
 upd = approx_update()
 # Required variables (without localization)
 upd.ne = 400  # number of ensemble members
-upd.lam = 1e-2  # LM parameter (0 for standard ES)
+upd.lam = 1e6  # LM parameter (0 for standard ES)
 upd.trunc_energy = 0.99
 upd.keys_da = {}  # No localization
 upd.list_states = ['rh']
@@ -107,9 +108,9 @@ observed_data_order_bfield = ['real(xx)', 'real(xy)', 'real(xz)', 'real(yx)', 'r
 nn_to_obs_udar_mapping = {data_name: (10+nn_index, observed_data_order_udar.index(data_name)) for nn_index, data_name in enumerate(NN_data_names[10:])}
 nn_to_obs_bfield_mapping = {data_name: (nn_index, observed_data_order_bfield.index(data_name)) for nn_index, data_name in enumerate(NN_data_names[:10])}
 
-data_type = 'Bfield'  # 'UDAR' or 'Bfield'
-mapping = nn_to_obs_bfield_mapping
-#mapping = nn_to_obs_udar_mapping
+data_type = 'UDAR'  # 'UDAR' or 'Bfield'
+#mapping = nn_to_obs_bfield_mapping
+mapping = nn_to_obs_udar_mapping
 
 def custom_loss(predictions, data_real, theta,Cd):
 
@@ -152,8 +153,11 @@ def simulate_ensemble(param_ensemble, well_pos_index):
     resistivity_tensor = torch.tensor(resistivity, dtype=torch.float32)
     nn_pred_tensor = NN_sim.image_to_log(resistivity_tensor)
     
-    # Extract predictions: shape (ne, n_tools, n_measurements)
-    nn_pred = nn_pred_tensor.detach().numpy()[:, :, [val[0] for val in mapping.values()]]
+    # convert NN bfield predictions to UDAR if needed
+    if data_type == 'UDAR':
+        nn_pred = convert_bfield_to_udar(nn_pred_tensor[:, :, :10].detach().numpy()) # only first 10 are bfield components
+    else:
+        nn_pred = nn_pred_tensor[:,:,:10].detach().numpy()
     
     # Reshape to (ne, n_data)
     predictions = nn_pred.reshape(ne, -1)
