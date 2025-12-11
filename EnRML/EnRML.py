@@ -226,7 +226,7 @@ prior_mean = sample_cov.mean(axis=1)
 current_log_rh_ensemble = pr['rh'].copy()
 
 #for el,assim_index in enumerate(tot_assim_index[:15]):
-for el in [0]: #range(0, len(tot_assim_index), 10):  # Process every 10th step: 0, 10, 20, ...
+for el in range(0,100,1): #range(0, len(tot_assim_index), 10):  # Process every 10th step: 0, 10, 20, ...
     assim_index = tot_assim_index[el]
     # well position index is the closest cell to the current tvd
     well_pos_index = np.argmin(np.abs(cell_center_tvd - TVD[el]))
