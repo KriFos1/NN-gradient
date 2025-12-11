@@ -1,5 +1,6 @@
 import torch
 from NeuralSim.image_to_log import EMProxy
+from udar_proxi.utils import convert_bfield_to_udar
 
 import os
 # fix the seed for reproducability
@@ -156,8 +157,11 @@ def simulate_ensemble(param_ensemble, well_pos_index):
     resistivity_tensor = torch.tensor(resistivity, dtype=torch.float32, device=device)
     nn_pred_tensor = NN_sim.image_to_log(resistivity_tensor)
     
-    # Extract predictions: shape (ne, n_tools, n_measurements)
-    nn_pred = nn_pred_tensor.detach().cpu().numpy()[:, :, [val[0] for val in mapping.values()]]
+    # convert NN bfield predictions to UDAR if needed
+    if data_type == 'UDAR':
+        nn_pred = convert_bfield_to_udar(nn_pred_tensor[:, :, :10].detach().numpy()) # only first 10 are bfield components
+    else:
+        nn_pred = nn_pred_tensor[:,:,:10].detach().numpy()
     
     # Reshape to (ne, n_data)
     predictions = nn_pred.reshape(ne, -1)
