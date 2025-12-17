@@ -69,8 +69,9 @@ nn_to_obs_udar_mapping = {data_name: (10 + nn_index, observed_data_order_udar.in
                           for nn_index, data_name in enumerate(NN_data_names[10:])}
 nn_to_obs_bfield_mapping = {data_name: (nn_index, observed_data_order_bfield.index(data_name))
                             for nn_index, data_name in enumerate(NN_data_names[:10])}
-data_type = 'UDAR'
-mapping = nn_to_obs_udar_mapping
+data_type = 'Bfield'  # 'Bfield' or 'UDAR'
+#mapping = nn_to_obs_udar_mapping
+mapping = nn_to_obs_bfield_mapping
 tool_info = [('6kHz', '83ft'), ('12kHz', '83ft'), ('24kHz', '83ft'),
              ('24kHz', '43ft'), ('48kHz', '43ft'), ('96kHz', '43ft')]
 
@@ -294,7 +295,7 @@ pr = {
 current_log_rh_ensemble = pr['rh'].copy()
 weights = np.ones(ne) / ne
 
-for el in range(0, len(tot_assim_index), 20):
+for el in range(0,100,5): #range(0, len(tot_assim_index), 20):
     well_pos_index = np.argmin(np.abs(cell_center_tvd - TVD[el]))
     Cd_row = Cd.iloc[el]
     Cd_vec = np.concatenate([np.array(cell[1])[[val[1] for val in mapping.values()]] for cell in Cd_row])

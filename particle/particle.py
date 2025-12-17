@@ -92,9 +92,9 @@ nn_to_obs_udar_mapping = {data_name: (10 + nn_index, observed_data_order_udar.in
 nn_to_obs_bfield_mapping = {data_name: (nn_index, observed_data_order_bfield.index(data_name)) for nn_index, data_name
                              in enumerate(NN_data_names[:10])}
 
-data_type = 'UDAR'  # 'UDAR' or 'Bfield'
-# mapping = nn_to_obs_bfield_mapping
-mapping = nn_to_obs_udar_mapping
+data_type = 'Bfield'  # 'UDAR' or 'Bfield'
+mapping = nn_to_obs_bfield_mapping
+#mapping = nn_to_obs_udar_mapping
 
 tool_info = [('6kHz','83ft'),('12kHz','83ft'),('24kHz','83ft'),('24kHz','43ft'),('48kHz','43ft'),('96kHz','43ft')]
 
@@ -239,7 +239,7 @@ def add_jitter(ensemble, jitter_scale=0.01):
 
 # Prior parameters
 tot_assim_index = [[el] for el in range(len(TVD))]
-v_corr = 50  # ft
+v_corr = 25  # ft
 grid_size = 128
 Dh = 1.64042  # ft. (0.5 m)
 log_rh_mean = 0.0
@@ -253,17 +253,12 @@ pr = {
                                                                               num_samples=ne)
 }
 
-sample_cov = fast_gaussian(np.array([1, grid_size]), np.array([log_rh_std]), np.array([1, int(np.ceil(v_corr / Dh))]),
-                           num_samples=50000)
-Cm = np.cov(sample_cov, ddof=1)
-prior_mean = sample_cov.mean(axis=1)
-
 # Initialize with prior ensemble in log-space
 current_log_rh_ensemble = pr['rh'].copy()
 weights = np.ones(ne) / ne  # Initial uniform weights
 
 # Main particle filter loop
-for el in range(0, len(tot_assim_index), 1):  # Process every 10th step: 0, 10, 20, ...
+for el in range(0,100,10): #range(0, len(tot_assim_index), 1):  # Process every 10th step: 0, 10, 20, ...
     assim_index = tot_assim_index[el]
     # well position index is the closest cell to the current tvd
     well_pos_index = np.argmin(np.abs(cell_center_tvd - TVD[el]))

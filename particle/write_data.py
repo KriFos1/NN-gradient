@@ -4,7 +4,7 @@ import pickle
 import pandas as pd
 
 data_index = [('6kHz','83ft'),('12kHz','83ft'),('24kHz','83ft'),('24kHz','43ft'),('48kHz','43ft'),('96kHz','43ft')]
-datatyp = 'UDAR'
+datatyp = 'Bfield'
 
 path_to_benchmark = '../data/Benchmark-3/'
 
@@ -36,6 +36,7 @@ for di in data_index:
             data[(freq, dist)] = values
             #var[(freq, dist)] = [[['REL', 10] if abs(el) > abs(0.1*np.mean(values)) else ['ABS', (0.1*np.mean(values))**2] for el in val] for val in values]
             var[(freq, dist)] = [['ABS'] + [[(0.02*np.mean(values))**2 for el in val]] for val in values]
+            #var[(freq, dist)] = [['ABS'] + [[(0.5*np.mean(values))**2 for el in val]] for val in values]
             #var[(freq, dist)] = [['ABS'] + [[(2.5)**2 for el in val]] for val in values]
     except:
         data[(freq, dist)] = None

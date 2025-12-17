@@ -14,8 +14,8 @@ tot_assim_index = [[el] for el in range(len(ED))]
 
 tot_mean = []
 tot_std = []
-for el in range(0, len(tot_assim_index), 20):
-    data = np.load(f'OTPF_rh_assim{el}_posterior_ensemble_{data_type}.npz')
+for el in range(0,100,1): #range(0, len(tot_assim_index), 1):
+    data = np.load(f'APF_rh_assim{el}_posterior_ensemble_{data_type}.npz')
     posterior_ensemble = data['posterior_ensemble']
     weights = data['weights']
     # Calculate mean and std for this assimilation step
@@ -29,7 +29,8 @@ fig, ax = plt.subplots(1, 2, figsize=(24, 6))
 im1 = ax[0].imshow(mean_posterior, aspect='auto', origin='lower', interpolation='bilinear')
 ax[0].set_title('Mean of Posterior Ensemble')
 ax[0].set_xlabel('ED (m)')
-selected_indices = list(range(0, len(tot_assim_index), 20))
+#selected_indices = list(range(0, len(tot_assim_index), 1))
+selected_indices = list(range(0, 100, 1))
 selected_ed = [ED[i] for i in selected_indices]
 ax[0].set_xticks(range(len(selected_indices)))
 ax[0].set_xticklabels([f'{ed:.1f}' for ed in selected_ed], rotation=45)

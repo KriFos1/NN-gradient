@@ -1,5 +1,6 @@
 import torch
 from NeuralSim.image_to_log import EMProxy
+from udar_proxi.utils import convert_bfield_to_udar
 
 import os
 import logging
@@ -37,9 +38,9 @@ for folder in os.listdir('.'):
 
 # Annealed Particle filter parameters
 ne = 10000  # number of particles
-resample_threshold = 0.5  # effective sample size threshold for resampling
-n_tempering_steps = 100  # number of annealing steps
-tempering_schedule = 'adaptive'  # 'geometric', 'linear', or 'adaptive'
+resample_threshold = 0.1  # effective sample size threshold for resampling
+n_tempering_steps = 1000  # number of annealing steps
+tempering_schedule = 'geometric'  # 'geometric', 'linear', or 'adaptive'
 
 data = pd.read_pickle('data.pkl')
 Cd = pd.read_pickle('var.pkl')
@@ -107,8 +108,8 @@ nn_to_obs_bfield_mapping = {data_name: (nn_index, observed_data_order_bfield.ind
                              in enumerate(NN_data_names[:10])}
 
 data_type = 'UDAR'  # 'UDAR' or 'Bfield'
-# mapping = nn_to_obs_bfield_mapping
 mapping = nn_to_obs_udar_mapping
+#mapping = nn_to_obs_bfield_mapping
 
 tool_info = [('6kHz','83ft'),('12kHz','83ft'),('24kHz','83ft'),('24kHz','43ft'),('48kHz','43ft'),('96kHz','43ft')]
 
@@ -142,9 +143,12 @@ def simulate_ensemble(param_ensemble, well_pos_index):
     # Convert to tensor and run forward pass (batched)
     resistivity_tensor = torch.tensor(resistivity, dtype=torch.float32, device=device)
     nn_pred_tensor = NN_sim.image_to_log(resistivity_tensor)
-    
-    # Extract predictions: shape (ne, n_tools, n_measurements)
-    nn_pred = nn_pred_tensor.detach().cpu().numpy()[:, :, [val[0] for val in mapping.values()]]
+
+    # convert NN bfield predictions to UDAR if needed
+    if data_type == 'UDAR':
+        nn_pred = convert_bfield_to_udar(nn_pred_tensor[:, :, :10].detach().cpu().numpy())[:,:,[val[1] for val in mapping.values()]] # only first 10 are bfield components
+    else:
+        nn_pred = nn_pred_tensor[:,:,:10].detach().numpy()
     
     # Reshape to (ne, n_data)
     predictions = nn_pred.reshape(ne, -1)
@@ -332,31 +336,32 @@ def generate_tempering_schedule(n_steps, schedule_type='geometric'):
 
 # Prior parameters
 tot_assim_index = [[el] for el in range(len(TVD))]
-v_corr = 50  # ft
+v_corr = 5  # ft
 grid_size = 128
 Dh = 1.64042  # ft. (0.5 m)
 log_rh_mean = 0.0
-log_rh_std = 1.5
+log_rh_std = 2.0
 
 # Generate initial prior ensemble
 pr = {
-    'rh': (np.ones(grid_size) * log_rh_mean).reshape(-1, 1) + fast_gaussian(np.array([1, grid_size]),
-                                                                              np.array([log_rh_std]),
-                                                                              np.array([1, int(np.ceil(v_corr / Dh))]),
-                                                                              num_samples=ne)
+    'rh': (np.ones(grid_size) * log_rh_mean).reshape(-1, 1) + fast_gaussian(
+        np.array([1, grid_size]),
+        np.array([log_rh_std]),
+        np.array([1, int(np.ceil(v_corr / Dh))]),
+        num_samples=ne
+    )
 }
-
-sample_cov = fast_gaussian(np.array([1, grid_size]), np.array([log_rh_std]), np.array([1, int(np.ceil(v_corr / Dh))]),
-                           num_samples=50000)
-Cm = np.cov(sample_cov, ddof=1)
-prior_mean = sample_cov.mean(axis=1)
+# log_rh_std = 1e-6
+# pr = {
+#     'rh': np.random.standard_cauchy(size=(grid_size, ne)) * log_rh_std + log_rh_mean
+# }
 
 # Initialize with prior ensemble in log-space
 current_log_rh_ensemble = pr['rh'].copy()
 weights = np.ones(ne) / ne  # Initial uniform weights
 
 # Main annealed particle filter loop
-for el in range(0, len(tot_assim_index), 1):  # Process every 10th step: 0, 10, 20, ...
+for el in range(0,100,1): #range(0, len(tot_assim_index), 1):  # Process every 10th step: 0, 10, 20, ...
     assim_index = tot_assim_index[el]
     # well position index is the closest cell to the current tvd
     well_pos_index = np.argmin(np.abs(cell_center_tvd - TVD[el]))
