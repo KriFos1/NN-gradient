@@ -20,7 +20,6 @@ from pipt.update_schemes.update_methods_ns.approx_update import approx_update # 
 upd = approx_update()
 # Required variables (without localization)
 upd.ne = 1000  # number of ensemble members
-upd.lam = 5e6  # LM parameter (0 for standard ES)
 upd.trunc_energy = 0.99
 upd.keys_da = {}  # No localization
 upd.list_states = ['rh']
@@ -159,7 +158,7 @@ def simulate_ensemble(param_ensemble, well_pos_index):
     
     # convert NN bfield predictions to UDAR if needed
     if data_type == 'UDAR':
-        nn_pred = convert_bfield_to_udar(nn_pred_tensor[:, :, :10].detach().numpy()) # only first 10 are bfield components
+        nn_pred = convert_bfield_to_udar(nn_pred_tensor[:, :, :10].detach().cpu().numpy()) # only first 10 are bfield components
     else:
         nn_pred = nn_pred_tensor[:,:,:10].detach().numpy()
     
@@ -170,7 +169,7 @@ def simulate_ensemble(param_ensemble, well_pos_index):
 
 def calculate_ensemble_loss(pred_ensemble, data_real, param_ensemble, Cd):
     """
-    Calculate loss for each ensemble member.
+    Calculate loss for each ensemble member (vectorized).
     
     Parameters:
     -----------
@@ -188,19 +187,17 @@ def calculate_ensemble_loss(pred_ensemble, data_real, param_ensemble, Cd):
     losses : np.ndarray, shape (ne,)
         Loss for each ensemble member
     """
-    ne = pred_ensemble.shape[0]
-    losses = np.zeros(ne)
+    # Data misfit term (vectorized over ensemble members)
+    residuals_data = data_real - pred_ensemble  # (ne, n_data)
+    data_loss = 0.5 * np.sum((residuals_data ** 2) / Cd, axis=1)  # (ne,)
     
-    for i in range(ne):
-        # Data misfit term
-        residuals_data = data_real - pred_ensemble[i]
-        data_loss = 0.5 * np.sum((residuals_data ** 2) / Cd)
-        
-        # Prior term (assuming log-normal prior)
-        residuals_theta = param_ensemble[i] - prior_mean.flatten()
-        theta_loss = 0.5 * residuals_theta @ np.linalg.solve(Cm, residuals_theta)
-        
-        losses[i] = data_loss + theta_loss
+    # Prior term (vectorized over ensemble members)
+    residuals_theta = param_ensemble - prior_mean.flatten()  # (ne, grid_size)
+    # Solve Cm @ temp = residuals_theta.T for temp, then compute quadratic form
+    temp = np.linalg.solve(Cm, residuals_theta.T)  # (grid_size, ne)
+    theta_loss = 0.5 * np.sum(residuals_theta.T * temp, axis=0)  # (ne,)
+    
+    losses = data_loss + theta_loss
     
     return losses
 
@@ -224,9 +221,11 @@ prior_mean = sample_cov.mean(axis=1)
 
 # Initialize with prior ensemble in log-space
 current_log_rh_ensemble = pr['rh'].copy()
+tmp_log_rh_ensemble = pr['rh'].copy()
 
 #for el,assim_index in enumerate(tot_assim_index[:15]):
-for el in range(0,100,1): #range(0, len(tot_assim_index), 10):  # Process every 10th step: 0, 10, 20, ...
+for el in range(0,100,10): #range(0, len(tot_assim_index), 10):  # Process every 10th step: 0, 10, 20, ...
+    upd.lam = 5e6  # LM parameter (0 for standard ES) --- RESET EACH STEP ---
     assim_index = tot_assim_index[el]
     # well position index is the closest cell to the current tvd
     well_pos_index = np.argmin(np.abs(cell_center_tvd - TVD[el]))
@@ -240,15 +239,33 @@ for el in range(0,100,1): #range(0, len(tot_assim_index), 10):  # Process every 
     upd.real_obs_data = data_real.reshape(-1,1)  # shape (n_data, ne)
     upd.scale_data = np.sqrt(Cd_vec)  # shape (n_data,)
 
-    tot_loss = []
+    tot_loss_mean = []
+    tot_loss_std = []
     
     for iteration in range(200):  # number of EnRML iterations per assimilation step
-        print(f"Assimilation step {el}, iteration {iteration}")
-        pred_ensemble = simulate_ensemble(np.exp(current_log_rh_ensemble).T, well_pos_index)  # shape (ne, n_data)
+        pred_ensemble = simulate_ensemble(np.exp(tmp_log_rh_ensemble).T, well_pos_index)  # shape (ne, n_data)
         
         # Calculate loss for each ensemble member
-        ensemble_losses = calculate_ensemble_loss(pred_ensemble, data_real, np.exp(current_log_rh_ensemble).T, Cd_vec)
-        print(f"Mean loss: {ensemble_losses.mean():.4f}, Std loss: {ensemble_losses.std():.4f}")
+        ensemble_losses = calculate_ensemble_loss(pred_ensemble, data_real, np.exp(tmp_log_rh_ensemble).T, Cd_vec)
+        tot_loss_mean.append(ensemble_losses.mean())
+        tot_loss_std.append(ensemble_losses.std())
+
+        if iteration % 10 == 0:
+            print(f"Assimilation step {el}, iteration {iteration}")
+            print(f"Mean loss: {ensemble_losses.mean():.4f}, Std loss: {ensemble_losses.std():.4f}")
+        
+        # if mean loss decreases update the upd.lam parameter
+        if iteration > 0:
+            # if loss doesnt chance much, break
+            if np.abs(tot_loss_mean[-1] - tot_loss_mean[-2]) < 1e-3:
+                print("Converged based on loss change. Stopping iterations.")
+                break
+            if tot_loss_mean[-1] < tot_loss_mean[-2]:
+                upd.lam *= 0.9
+                # accept update
+                current_log_rh_ensemble = tmp_log_rh_ensemble
+            else:
+                upd.lam *= 1.1
 
         upd.current_state = {'rh': current_log_rh_ensemble}  # shape (n_state, ne)
         upd.state_scaling = np.ones(grid_size)  # or proper scaling
@@ -260,7 +277,7 @@ for el in range(0,100,1): #range(0, len(tot_assim_index), 10):  # Process every 
         upd.update()
 
         # deploy step to ensemble
-        current_log_rh_ensemble += upd.step
+        tmp_log_rh_ensemble = current_log_rh_ensemble + upd.step
     
     # Plot ensemble mean of posterior
     plt.figure(); plt.imshow(current_log_rh_ensemble.mean(axis=1).reshape(grid_size,1), aspect='auto')
@@ -273,7 +290,7 @@ for el in range(0,100,1): #range(0, len(tot_assim_index), 10):  # Process every 
     plt.savefig(f'rh_assim{el}_ensemble_std_{data_type}.png'); plt.close()
 
     # save posterior ensemble to file
-    np.savez_compressed(f'rh_assim{el}_posterior_ensemble_{data_type}.npz', posterior_ensemble=current_log_rh_ensemble)
+    np.savez_compressed(f'rh_assim{el}_posterior_ensemble_{data_type}.npz', posterior_ensemble=current_log_rh_ensemble, pred_ensemble=pred_ensemble)
     
     # Condition the ensemble for next assimilation step
     # This maintains spatial correlation while adding stochasticity
