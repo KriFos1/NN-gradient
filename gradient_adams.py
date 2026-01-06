@@ -42,9 +42,10 @@ nn_input_dict = {'input_shape': (3,128), # These are fixed
 
 # Set up multi-GPU configuration
 num_gpus = torch.cuda.device_count()
-print(f"Number of GPUs available: {num_gpus}")
-if num_gpus == 0:
-    raise RuntimeError("No GPUs available!")
+if num_gpus > 0:
+    print(f"Number of GPUs available: {num_gpus}")
+else:
+    print("No GPUs available, running on CPU.")
 
 # We'll create NN models per worker process, not here
 device = None  # Will be set per worker process
@@ -65,11 +66,13 @@ assert TVD[-1] - TVD[0] < 128 * Dh, "The well trajectory exceeds the grid depth 
 # Cell-center values
 grid_size = 128
 # Initial position in one-hot vector
-well_start_index = 25  # starting at cell 25
+well_start_index = 64  # starting at cell 64
 
-# Cell center positions: TVD[0] is at center of cell 25
+# Cell center positions: TVD[0] is at center of cell 64
 # Cell indices go from 0 to 127, with cell well_start_index at TVD[0]
 cell_center_tvd = TVD[0] + (np.arange(grid_size) - well_start_index) * Dh
+
+data_type = 'UDAR'  # or 'Bfield'
 
 
 def custom_loss(predictions, data_real, theta, Cd, mean_res_tensor=None, cov_res_inv_tensor=None):
@@ -194,11 +197,12 @@ cov_res_inv_np = np.linalg.inv(cov_res)
 
 
 def process_ensemble_member_worker(args):
-    """Worker function that processes ensemble member on a specific GPU"""
-    ens_idx, gpu_id, el, assim_index, current_log_rh_ensemble, well_pos_index_val, Cd_vec, data_vec, mean_res_np, cov_res_inv_np = args
+    """Worker function that processes an ensemble member on the specified device"""
+    (ens_idx, device_str, el, assim_index, current_log_rh_ensemble, well_pos_index_val,
+     Cd_vec, data_vec, mean_res_np, cov_res_inv_np) = args
     
-    # Set device for this worker
-    device = torch.device(f'cuda:{gpu_id}')
+    # Set device for this worker (CUDA or CPU)
+    device = torch.device(device_str)
     
     # Create NN model for this worker (not shared across processes)
     worker_nn = EMProxy(**nn_input_dict).to(device)
@@ -326,7 +330,11 @@ if __name__ == '__main__':
         # well position index is the closest cell to the current tvd
         well_pos_index = 64 # np.argmin(np.abs(cell_center_tvd - TVD[el]))
 
-        print(f"\nProcessing assimilation step {el} with {ne} ensemble members in parallel across {num_gpus} GPUs...")
+        use_cuda = num_gpus > 0
+        processes = num_gpus if use_cuda else min(mp.cpu_count(), 1)
+        device_targets = [f'cuda:{i}' for i in range(num_gpus)] if use_cuda else ['cpu'] * processes
+
+        print(f"\nProcessing assimilation step {el} with {ne} ensemble members in parallel across {processes} {'GPUs' if use_cuda else 'CPU workers'}...")
         
         # Pre-extract data to avoid passing large dataframes to workers
         Cd_row = Cd.iloc[el]
@@ -334,16 +342,16 @@ if __name__ == '__main__':
         data_vec = np.concatenate([data.iloc[el][dat] for dat in data_keys])
         
         # Create argument list for each ensemble member
-        # Distribute ensemble members across GPUs in round-robin fashion
+        # Distribute ensemble members across available devices in round-robin fashion
         args_list = [
-            (ens_idx, ens_idx % num_gpus, el, assim_index, current_log_rh_ensemble, 
+            (ens_idx, device_targets[ens_idx % len(device_targets)], el, assim_index, current_log_rh_ensemble, 
              well_pos_index, Cd_vec, data_vec, mean_res_np, cov_res_inv_np)
             for ens_idx in range(ne)
         ]
         
         # Parallel processing across multiple GPUs
-        # Process num_gpus members simultaneously (one per GPU)
-        with mp.Pool(processes=num_gpus) as pool:
+        # Process ensemble members simultaneously (one per available device/worker)
+        with mp.Pool(processes=processes) as pool:
             results = pool.map(process_ensemble_member_worker, args_list)
         
         # Process results
