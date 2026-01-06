@@ -1,3 +1,4 @@
+import geostat
 import torch
 from NeuralSim.image_to_log import EMProxy
 import torch.multiprocessing as mp
@@ -11,6 +12,7 @@ import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend for parallel processing
 import matplotlib.pyplot as plt
 #from joblib import Parallel, delayed
+from udar_proxi.utils import convert_bfield_to_udar_torch
 
 np.random.seed(10)
 
@@ -69,33 +71,6 @@ well_start_index = 25  # starting at cell 25
 # Cell indices go from 0 to 127, with cell well_start_index at TVD[0]
 cell_center_tvd = TVD[0] + (np.arange(grid_size) - well_start_index) * Dh
 
-NN_data_names = [
-        'real(xx)', 'img(xx)',
-        'real(yy)', 'img(yy)',
-        'real(zz)', 'img(zz)',
-        'real(xz)', 'img(xz)',
-        'real(zx)', 'img(zx)',
-        'USDA', 'USDP',
-        'UADA', 'UADP',
-        'UHRA', 'UHRP',
-        'UHAA', 'UHAP'
-    ]
-observed_data_order_udar = [
-        'USDP', 'USDA',
-        'UADP', 'UADA',
-        'UHRP', 'UHRA',
-        'UHAP', 'UHAA'
-    ]
-
-observed_data_order_bfield = ['real(xx)', 'real(xy)', 'real(xz)', 'real(yx)', 'real(yy)', 'real(yz)', 'real(zx)', 'real(zy)', 'real(zz)',
-                             'img(xx)', 'img(xy)', 'img(xz)', 'img(yx)', 'img(yy)', 'img(yz)', 'img(zx)', 'img(zy)', 'img(zz)']
-
-nn_to_obs_udar_mapping = {data_name: (10+nn_index, observed_data_order_udar.index(data_name)) for nn_index, data_name in enumerate(NN_data_names[10:])}
-nn_to_obs_bfield_mapping = {data_name: (nn_index, observed_data_order_bfield.index(data_name)) for nn_index, data_name in enumerate(NN_data_names[:10])}
-
-data_type = 'UDAR'  # 'UDAR' or 'Bfield'
-#mapping = nn_to_obs_bfield_mapping
-mapping = nn_to_obs_udar_mapping
 
 def custom_loss(predictions, data_real, theta, Cd, mean_res_tensor=None, cov_res_inv_tensor=None):
     """
@@ -150,28 +125,6 @@ def custom_loss(predictions, data_real, theta, Cd, mean_res_tensor=None, cov_res
     
     return loss
 
-def simulate_and_grad(param, data_real, Cd):
-
-    resistivity = np.zeros((3, grid_size))
-    resistivity[0,:] = param
-    resistivity[1,:] = param
-    resistivity[2,well_pos_index] = 1  # well position
-    resistivity_tensor = torch.tensor(resistivity, dtype=torch.float32)
-
-    nn_pred_tensor = NN_sim.image_to_log(resistivity_tensor)
-    nn_jacobian = torch.autograd.functional.jacobian(NN_sim.image_to_log, resistivity_tensor)
-    jacobian = nn_jacobian.detach().numpy()[0,:,[val[0] for val in mapping.values()],0,:].reshape(-1, grid_size)
-    nn_pred = nn_pred_tensor.detach().numpy()[:,:,[val[0] for val in mapping.values()]].flatten()
-
-    loss = custom_loss(nn_pred, data_real, param,Cd)
-    #print(loss)
-
-    grad = jacobian.T @ ((nn_pred - data_real) / Cd) + np.linalg.solve(cov_res, param - mean_res.flatten())
-
-    # hessian_approx = jacobian.T @ (jacobian / Cd[:, np.newaxis]) + inv_cm
-
-    return loss, grad #, hessian_approx
-
 def lognormal_from_log_gaussian(mu, Sigma):
     """
     Compute mean and covariance of a log-normal vector X = exp(Y)
@@ -214,20 +167,23 @@ def lognormal_from_log_gaussian(mu, Sigma):
 
 tot_assim_index = [[el] for el in range(len(TVD))]
 
-v_corr = 20  #ft
+v_corr = 50  #ft
 grid_size = 128
 Dh = 1.64042 #ft. (0.5 m)
-log_rh_mean = 0.0
-log_rh_std = 1.5
+log_rh_mean = 0
+#log_rv_mean = 2
+log_rh_std = 0.5
 ne = 100
+
+from geostat.decomp import Cholesky
+geostat = Cholesky()
+Cm = geostat.gen_cov2d(grid_size,1,log_rh_std**2, v_corr/Dh, 1,1,'exp')
+pr_rh = geostat.gen_real(np.ones(grid_size)*log_rh_mean, Cm, ne)
+
 pr = {
-    'rh': (np.ones(grid_size)*log_rh_mean).reshape(-1, 1)+ fast_gaussian(np.array([1,grid_size]),
-                                                                            np.array([log_rh_std]),
-                    np.array([1, int(np.ceil(v_corr / Dh))]),num_samples=ne)
+    'rh': pr_rh
             }
 
-sample_cov = fast_gaussian(np.array([1,grid_size]),np.array([log_rh_std]),np.array([1, int(np.ceil(v_corr / Dh))]),num_samples=50000)
-Cm = np.cov(sample_cov,ddof=1)
 #Cm = np.ones(grid_size)*(log_rh_std**2)  # prior covariance matrix
 
 mean_res, cov_res = lognormal_from_log_gaussian(np.ones(grid_size)*log_rh_mean, Cm)
@@ -291,8 +247,10 @@ def process_ensemble_member_worker(args):
         resistivity_tensor = torch.cat([resistivity_optimizable, resistivity_copy, well_position_row], dim=0)
 
         nn_pred_tensor = worker_nn.image_to_log(resistivity_tensor)
-        nn_pred = nn_pred_tensor[:,:,[val[0] for val in mapping.values()]].reshape(-1)
-
+        if data_type == 'UDAR':
+            nn_pred = convert_bfield_to_udar_torch(nn_pred_tensor[:,:,:10])
+        else:
+            nn_pred = nn_pred_tensor[:,:,:10]
         # Compute loss using custom_loss function (automatically handles PyTorch tensors)
         loss_tensor = custom_loss(nn_pred, data_real_tensor, resistivity_optimizable[0,:], Cd_tensor, 
                                    mean_res_tensor, cov_res_inv_tensor)
@@ -366,14 +324,14 @@ if __name__ == '__main__':
     for el in [0]: #range(0, len(tot_assim_index), 20):  # Process every 20th step: 0, 20, 40, ...
         assim_index = tot_assim_index[el]
         # well position index is the closest cell to the current tvd
-        well_pos_index = np.argmin(np.abs(cell_center_tvd - TVD[el]))
+        well_pos_index = 64 # np.argmin(np.abs(cell_center_tvd - TVD[el]))
 
         print(f"\nProcessing assimilation step {el} with {ne} ensemble members in parallel across {num_gpus} GPUs...")
         
         # Pre-extract data to avoid passing large dataframes to workers
         Cd_row = Cd.iloc[el]
-        Cd_vec = np.concatenate([np.array(cell[1])[[val[1] for val in mapping.values()]] for cell in Cd_row])
-        data_vec = np.concatenate([data.iloc[el][dat][[val[1] for val in mapping.values()]] for dat in data_keys])
+        Cd_vec = np.concatenate([np.array(cell[1]) for cell in Cd_row])
+        data_vec = np.concatenate([data.iloc[el][dat] for dat in data_keys])
         
         # Create argument list for each ensemble member
         # Distribute ensemble members across GPUs in round-robin fashion
