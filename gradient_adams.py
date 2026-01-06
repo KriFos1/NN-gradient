@@ -293,11 +293,11 @@ def process_ensemble_member_worker(args):
             
         if no_improvement_count >= patience:
             print(f"  Ens {ens_idx}: Early stopping at iteration {iteration+1} (no improvement for {patience} iterations)")
-            return ens_idx, resistivity_optimizable[0,:].detach().cpu().numpy(), current_loss, False
+            return ens_idx, resistivity_optimizable[0,:].detach().cpu().numpy(), current_loss, False, tot_loss
 
     print(f"  Ens {ens_idx}: Finished optimization at iteration {iteration+1} with prior loss {tot_loss[0]:.4f} and posterior loss {current_loss:.4f} -- a reduction of %.2f%%" % ((tot_loss[0]-current_loss)/tot_loss[0]*100))
     
-    return ens_idx, resistivity_optimizable[0,:].detach().cpu().numpy(), current_loss, True
+    return ens_idx, resistivity_optimizable[0,:].detach().cpu().numpy(), current_loss, True, tot_loss
 
     # Save plots for this ensemble member
     # plt.figure(); plt.imshow(res.x.reshape(grid_size,1), aspect='auto')
@@ -354,10 +354,14 @@ if __name__ == '__main__':
         with mp.Pool(processes=processes) as pool:
             results = pool.map(process_ensemble_member_worker, args_list)
         
+        #
+        all_loss_trace = []
+
         # Process results
         posterior_ensemble = np.zeros((grid_size, ne))
-        for ens_idx, posterior, loss, success in results:
+        for ens_idx, posterior, loss, success, tot_loss in results:
             posterior_ensemble[:, ens_idx] = posterior
+            all_loss_trace.append(tot_loss)
             if not success:
                 print(f"Warning: Optimization failed for ensemble member {ens_idx}")
         
@@ -373,6 +377,16 @@ if __name__ == '__main__':
         plt.figure(); plt.imshow(posterior_ensemble.std(axis=1).reshape(grid_size,1), aspect='auto')
         plt.colorbar(); plt.title(f'Posterior ensemble std assim {el} - rh')
         plt.savefig(f'rh_assim{el}_ensemble_std_{data_type}.png'); plt.close()
+
+        # plot all loss traces in one figure
+        plt.figure()
+        for ens_idx, tot_loss in enumerate(all_loss_trace):
+            plt.plot(tot_loss, label=f'Ens {ens_idx}')
+        plt.xlabel('Iteration')
+        plt.ylabel('Loss')
+        plt.title(f'Loss traces for assim {el} - rh')
+        plt.legend()
+        plt.savefig(f'rh_assim{el}_loss_traces_{data_type}.png'); plt.close()
 
         # save posterior ensemble to file
         np.savez_compressed(f'rh_assim{el}_posterior_ensemble_{data_type}.npz', posterior_ensemble=posterior_ensemble)
